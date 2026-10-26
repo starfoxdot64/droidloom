@@ -27,15 +27,77 @@ pub const HOST_BINARIES: &[&str] = &[
 fn json(path: &Path) -> Result<Value> {
     Ok(serde_json::from_slice(&fs::read(path)?)?)
 }
+#[derive(serde::Deserialize)]
+struct ArtifactPageVariables {
+    artifact: String,
+    #[serde(rename = "artifactUrl")]
+    artifact_url: String,
+}
+fn artifact_url_from_page(page: &str, artifact_name: &str) -> Result<String> {
+    let variables = page
+        .split_once("var JSVariables = ")
+        .ok_or("Android CI artifact page has no download metadata")?
+        .1
+        .split_once(';')
+        .ok_or("Android CI artifact page has incomplete download metadata")?
+        .0;
+    let variables: ArtifactPageVariables = serde_json::from_str(variables)?;
+    if variables.artifact != artifact_name {
+        return fail(format!(
+            "Android CI artifact page returned {}, expected {artifact_name}",
+            variables.artifact
+        ));
+    }
+    let (object_url, query) = variables
+        .artifact_url
+        .split_once('?')
+        .ok_or("Android CI artifact page returned an unsigned download URL")?;
+    if !object_url.starts_with("https://storage.googleapis.com/android-build/")
+        || !object_url.ends_with(&format!("/{artifact_name}"))
+        || !query
+            .split('&')
+            .any(|field| field.starts_with("GoogleAccessId="))
+        || !query
+            .split('&')
+            .any(|field| field.starts_with("Signature="))
+    {
+        return fail("Android CI artifact page returned an invalid signed download URL");
+    }
+    Ok(variables.artifact_url)
+}
+fn resolve_artifact_url(page_url: &str, artifact_name: &str) -> Result<String> {
+    let page = output(
+        Command::new("curl")
+            .args([
+                "--fail",
+                "--location",
+                "--retry",
+                "3",
+                "--silent",
+                "--show-error",
+            ])
+            .arg(page_url),
+    )?;
+    artifact_url_from_page(&page, artifact_name)
+}
 pub(crate) fn download(url: &str, path: &Path, expected: &str) -> Result<()> {
     if path.exists() && hash(path)? == expected {
         return Ok(());
     }
     let scratch = path.with_extension("download");
-    run(Command::new("curl")
+    let mut command = Command::new("curl");
+    command
         .args(["--fail", "--location", "--retry", "3", "--output"])
         .arg(&scratch)
-        .arg(url))?;
+        .arg(url);
+    eprintln!(
+        "+ curl --fail --location --retry 3 --output {} <download URL redacted>",
+        scratch.display()
+    );
+    let status = command.stdin(Stdio::null()).status()?;
+    if !status.success() {
+        return fail(format!("download failed ({status}): {}", path.display()));
+    }
     if hash(&scratch)? != expected {
         return fail(format!("download checksum mismatch: {}", path.display()));
     }
@@ -106,14 +168,13 @@ fn prepare_inputs_from(
         path
     } else {
         let archive = repo.join(".work").join(&typed.aosp_ci_base.artifact_name);
-        // Public redirect endpoint used by Android's kleaf kernel_prebuilt_repo.bzl.
-        let url = format!(
-            "https://androidbuildinternal.googleapis.com/android/internal/build/v3/builds/{}/{}/attempts/latest/artifacts/{}/url?redirect=true",
-            typed.aosp_ci_base.build_number,
-            typed.aosp_ci_base.target,
-            typed.aosp_ci_base.artifact_name
-        );
-        download(&url, &archive, &typed.aosp_ci_base.artifact_sha256)?;
+        if !(archive.exists() && hash(&archive)? == typed.aosp_ci_base.artifact_sha256) {
+            let url = resolve_artifact_url(
+                &typed.aosp_ci_base.artifact_page_url,
+                &typed.aosp_ci_base.artifact_name,
+            )?;
+            download(&url, &archive, &typed.aosp_ci_base.artifact_sha256)?;
+        }
         if base.exists() {
             fs::remove_dir_all(&base)?;
         }
@@ -838,6 +899,23 @@ fn preserve_settings(spec: &mut Value, existing: &Value, uid: u32) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn artifact_page_resolves_the_expected_signed_download_url() {
+        let page = r#"<script>var JSVariables = {"artifact":"base.zip","artifactUrl":"https://storage.googleapis.com/android-build/builds/target/base.zip?GoogleAccessId=id\u0026Expires=1\u0026Signature=sig","authed":true};</script>"#;
+        assert_eq!(
+            artifact_url_from_page(page, "base.zip").unwrap(),
+            "https://storage.googleapis.com/android-build/builds/target/base.zip?GoogleAccessId=id&Expires=1&Signature=sig"
+        );
+    }
+    #[test]
+    fn artifact_page_rejects_wrong_or_unsigned_downloads() {
+        let wrong_artifact = r#"var JSVariables = {"artifact":"other.zip","artifactUrl":"https://storage.googleapis.com/android-build/other.zip?GoogleAccessId=id\u0026Signature=sig"};"#;
+        assert!(artifact_url_from_page(wrong_artifact, "base.zip").is_err());
+        let unsigned = r#"var JSVariables = {"artifact":"base.zip","artifactUrl":"https://storage.googleapis.com/android-build/base.zip"};"#;
+        assert!(artifact_url_from_page(unsigned, "base.zip").is_err());
+        let external = r#"var JSVariables = {"artifact":"base.zip","artifactUrl":"https://example.com/base.zip?GoogleAccessId=id\u0026Signature=sig"};"#;
+        assert!(artifact_url_from_page(external, "base.zip").is_err());
+    }
     #[test]
     fn update_keeps_personal_state_but_replaces_runtime_mappings() {
         let existing = json!({"host_uid":1000,"data_dir":"/var/lib/droidloom/custom-data","shared_storage_directories":[{"source":"/home/test/Downloads"}],"android_file_overrides":["old"]});

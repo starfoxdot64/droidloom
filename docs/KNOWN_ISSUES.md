@@ -653,8 +653,11 @@ remains deferred for the current Denial target, with full damage on changed laye
 ## Build and distribution
 
 - The rootless package workflow has passed package lifecycle checks and fresh
-  Omarchy installation tests, but downloading all sources with completely empty
-  caches has not yet been rehearsed.
+  Omarchy installation tests, but a complete build from empty caches has not
+  yet been rehearsed end-to-end. Android CI base archives are downloaded through
+  a signed URL resolved from the stable artifact page because the Build API URL
+  endpoint returns `UNIMPLEMENTED`; each archive is checked against its pinned
+  SHA-256.
 - Package staging needs additional disk space beyond retained compiler outputs.
   A build can compile successfully and still fail during image copying or archive
   creation if the filesystem is full.

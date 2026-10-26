@@ -623,8 +623,10 @@ If staging fails with `No space left on device`, free disposable outputs and rer
 the builder. Do not distribute partial archives from a failed attempt. APKs,
 packages, caches and local test artifacts must stay out of Git.
 
-The fully empty-cache source-download path has not yet been rehearsed; see
-[KNOWN_ISSUES.md](KNOWN_ISSUES.md). Build logs should accompany reports of failures.
+The complete empty-cache build has not yet been rehearsed end-to-end; see
+[KNOWN_ISSUES.md](KNOWN_ISSUES.md). The Android CI base archive download resolves
+a fresh signed URL from its stable artifact page and verifies the locked SHA-256.
+Build logs should accompany reports of failures.
 
 ## Desktop image policy
 
